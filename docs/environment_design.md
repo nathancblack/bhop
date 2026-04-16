@@ -24,20 +24,22 @@ The environment wraps Q3Physics into a standard Gymnasium interface. Flat infini
 
 ## Action Space
 
-`MultiDiscrete([3, 3, 2, N])`:
+`Box(4,)` float32 -- continuous, matching human input fidelity:
 
-| Dim | Values | Meaning | Maps to |
-|-----|--------|---------|---------|
-| 0   | 0/1/2  | forward: none / forward / backward | 0, +127, -127 |
-| 1   | 0/1/2  | right: none / right / left | 0, +127, -127 |
-| 2   | 0/1    | jump: no / yes | False, True |
-| 3   | 0..N   | yaw delta: discrete steps | e.g., N=11 → [-5°, -4°, ..., 0°, ..., +4°, +5°] per tick |
+| Dim | Range | Threshold | Maps to |
+|-----|-------|-----------|---------|
+| 0   | [-1, 1] | ±0.33 | forward: >0.33 → +127, <-0.33 → -127, else 0 |
+| 1   | [-1, 1] | ±0.33 | right: >0.33 → +127, <-0.33 → -127, else 0 |
+| 2   | [-1, 1] | 0.0 | jump: >0.0 → yes, else no |
+| 3   | [-5, 5] | none | yaw delta: continuous degrees per tick, converted to radians |
 
-**Why MultiDiscrete**: In real Q3, players hold digital keys (WASD, space). Movement commands are -127, 0, or +127. A continuous Box action space would let the agent find fractional inputs that don't exist in the real game.
+**Why continuous with thresholds**: Matches human input fidelity exactly. A human Q3 player has binary WASD + spacebar (discrete movement keys) and continuous mouse yaw. The thresholding converts the Gaussian policy's continuous output into discrete key states, while yaw remains fully continuous. This was converted from an earlier `MultiDiscrete([3, 3, 2, 11])` space that bottlenecked yaw at 1° resolution.
 
 **Why jump is not automatic**: The agent must discover that jumping immediately on every ground contact is part of bhop. Auto-jump would hand it the answer.
 
 **Why yaw delta is included**: The agent controls how fast it rotates each tick. This is the mouse movement. Combined with strafe keys, it determines the wish direction relative to velocity. The agent must learn to coordinate yaw rotation with strafe direction -- this IS the core of bhop technique.
+
+**Note on deterministic evaluation**: The Gaussian policy's mean can land near threshold boundaries (e.g., right action at -0.37, barely past the -0.33 threshold). Stochastic evaluation (`deterministic=False`) is more representative of learned behavior than deterministic.
 
 ### Yaw Implementation Detail
 
@@ -46,22 +48,13 @@ Each tick, the yaw delta action is added to it. The wish direction is then compu
 
 ```python
 forward_dir = [cos(yaw), sin(yaw), 0]
-right_dir = [sin(yaw), -cos(yaw), 0]  # or however Q3 defines it
+right_dir = [sin(yaw), -cos(yaw), 0]
 wishvel = forward_dir * forward_move + right_dir * right_move
 wishdir = normalize(wishvel)
 wishspeed = |wishvel| * cmd_scale
 ```
 
 **Edge case**: At zero velocity, yaw defaults to 0. The first forward input goes in +X direction.
-
-### Alternative: Simplified yaw (facing = velocity direction)
-
-For faster initial development, yaw can be locked to the velocity direction:
-- Forward pushes along velocity (projection = |v|, capped at 320)
-- Right pushes perpendicular (projection = 0, always gains speed)
-- Agent can still discover bhop but can't optimize angles
-
-This could be a stepping stone: implement simplified first, add explicit yaw control after basic bhop is validated.
 
 ## Reward
 
@@ -112,23 +105,31 @@ model = PPO(
     batch_size=64,
     n_epochs=10,
     gamma=0.99,
-    ent_coef=0.01,           # CRITICAL: keeps exploration alive for bhop discovery
-    policy_kwargs=dict(
-        net_arch=[64, 64],   # small network -- observation is only 5 dims
-        # activation_fn defaults to Tanh, good for locomotion
-    ),
+    ent_coef=0.01,
+    policy_kwargs=dict(net_arch=[128, 128]),
     tensorboard_log="runs/",
+    seed=42,
     verbose=1,
 )
 
-model.learn(total_timesteps=2_000_000)
-model.save("models/bhop_ppo")
+model.learn(total_timesteps=10_000_000)
+model.save("models/bhop_10m_continuous")
 ```
 
 ### Key Hyperparameter Notes
 
-- **`ent_coef=0.01`**: Most important deviation from defaults. Without entropy regularization, the policy collapses to walking before discovering bhop. May need 0.02-0.05 if agent doesn't explore enough.
-- **`n_envs=8`**: Physics are cheap (no rendering). More envs = more diverse experience per rollout.
-- **`net_arch=[64, 64]`**: Deliberately small. The optimal policy is not complex.
+- **`ent_coef=0.01`**: Most important deviation from defaults. Without entropy regularization, the policy collapses to walking before discovering bhop.
+- **`n_envs=8`**: Physics are cheap (no rendering). More envs = more diverse experience per rollout. ~3300 fps on CPU.
+- **`net_arch=[128, 128]`**: Best config from 12-config sweep. Larger than [64,64] default -- helps with continuous action space.
 - **`gamma=0.99`**: Speed gains compound over time. Lower gamma would undervalue future speed.
-- **`total_timesteps=2M`**: Starting point. May need 5-10M. Checkpoint frequently.
+- **`total_timesteps=10M`**: 2M is enough to discover bhop (~620 mean ups), 10M refines it (~660 mean, 926 max).
+
+### Training Results (continuous action space)
+
+| Model | Steps | Mean Speed | Max Speed | Notes |
+|-------|-------|-----------|-----------|-------|
+| Discrete baseline | 2M | 523.5 | 631.1 | 11-step yaw bottleneck |
+| Continuous | 2M | 616.6 | 857.6 | +18% mean, +36% max |
+| Continuous | 10M | 656.5 | 925.9 | Still accelerating at tick 1000 |
+
+All continuous results use stochastic evaluation. Agent is 96% airborne with ~2 jumps/episode (1000 ticks).

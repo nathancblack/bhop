@@ -69,6 +69,18 @@ Each top-level issue is a GitHub issue. Sub-issues are checkboxes within the iss
 - `test_no_bhop_without_jumping` -- strafing on ground does NOT exceed 320
 - **Test**: Confirms the exploit exists in the physics and requires both jumping AND strafing
 
+#### Known issue: bhop test yaw rate sensitivity
+The scripted bhop verification originally used `yaw_rate = np.radians(2.5)` (2.5 deg/tick).
+This rate is too aggressive: at 125fps with JUMP_VELOCITY=270 and sv_gravity=800, each jump
+lasts ~83 air ticks, producing **210 degrees of yaw rotation per jump**. The yaw direction
+diverges massively from velocity direction (velocity only curves ~6 degrees per jump), causing
+the strafe to alternate between accelerating and decelerating across cycles. The corrected
+rate is **0.4 deg/tick** (~33 degrees per jump), which produces 456 ups after 15 bhop cycles.
+
+For reference, real Q3 bhoppers rotate 20-40 degrees per jump. The optimal yaw rate for a
+given speed is approximately `arccos(wishspeed / |velocity|)` per tick, which at 320 ups is
+~90° total spread over the jump. 0.4 deg/tick × 83 ticks ≈ 33° is well within the effective range.
+
 ---
 
 ## Issue 3: Gymnasium Environment
@@ -187,23 +199,79 @@ Each top-level issue is a GitHub issue. Sub-issues are checkboxes within the iss
 
 ## Future Issues (Stretch Goals)
 
-### Issue 8: 3D environment with explicit yaw control
-- If not already done: add yaw delta to action space
-- Add pitch control for looking up/down
-- Still flat plane but full 3D velocity tracking
+### Issue 8: Continuous action space -- COMPLETE
+- Converted from MultiDiscrete([3, 3, 2, 11]) to Box(4,) float32
+- Forward/right thresholded at ±0.33, jump at 0.0, yaw continuous degrees
+- Matches human input fidelity (binary WASD + continuous mouse)
+- Best model: 10M continuous, 656.5 mean / 925.9 max ups (stochastic eval)
+- See environment_design.md for updated action space details
 
-### Issue 9: Map geometry
-- Add simple obstacles (walls, ramps)
-- BSP-like collision detection (or simplified box collision)
-- Agent must learn to bhop while navigating
+---
 
-### Issue 10: CUDA-accelerated physics
+## Issue 9: Map geometry + collision -- COMPLETE
+
+**Goal**: Add AABB collision detection to the physics engine for walls and ramps. Geometry is dual-purpose: usable in Python training AND exportable to Q3 `.map` format.
+
+- 9a: Geometry data structures -- COMPLETE (`geometry.py`: Brush, TraceResult, MapGeometry)
+- 9b: Trace/collision detection -- COMPLETE (`trace_ray`, `trace` with slab method + DIST_EPSILON)
+- 9c: Integrate collision into physics tick -- COMPLETE (`_pm_clip_velocity`, `_pm_slide_move`)
+- 9d: Ground trace with geometry -- COMPLETE (downward trace, MIN_WALK_NORMAL, world floor fallback)
+- 9e: Env integration -- COMPLETE (`map_geometry` param, `bhop/BhopCorridor-v0` registered)
+- 9f: Geometry tests -- COMPLETE (23 tests in `tests/test_geometry.py`, all 48 tests passing)
+- Corridor model trained: 540 mean / 628 max ups (`models/bhop_corridor_2m`)
+
+---
+
+## Active Issues (Next Phase)
+
+### Issue 10: Q3 demo export
+
+**Goal**: Record agent inputs as `.dm_68` demo files playable in ioquake3/DeFRaG.
+
+### 10a: Research `.dm_68` format
+- Document from ioquake3 source: gamestate messages, snapshots, usercmd_t
+- Key struct: `usercmd_t { serverTime, angles[3], forwardmove, rightmove, upmove, buttons }`
+- Document minimum viable demo structure
+
+### 10b: Demo writer
+- `src/bhop/demo.py`: accumulates per-tick usercmd_t, writes binary `.dm_68`
+- **Test**: flat-plane bhop demo plays in ioquake3
+
+### 10c: Q3 map file generation
+- `src/bhop/map_export.py`: convert Python AABB geometry → Q3 `.map` text format
+- AABB → 6 brush planes, add spawn point, worldspawn entity
+- Compiles to `.bsp` via external `q3map2`
+- **Test**: Generated `.map` compiles and loads in ioquake3
+
+### 10d: End-to-end pipeline test
+- Train on corridor → export demo → export map → play in Q3
+- Verify trajectory matches (no major drift)
+
+---
+
+### Issue 12: Pixel-based observation
+
+**Goal**: Replace vector obs with rendered image frames. Agent discovers bhop from pixels.
+
+See `docs/pixel_obs_plan.md` for full detailed plan.
+
+### 12a: Top-down renderer (pygame, 84x84 RGB)
+### 12b: Frame stacking wrapper (4 frames)
+### 12c: CNN policy configuration (SB3 CnnPolicy)
+### 12d: Training + comparison vs vector baseline
+### 12e: Analysis (Grad-CAM, filter visualization, t-SNE)
+
+---
+
+## Future Issues (Stretch Goals)
+
+### Issue 13: CUDA-accelerated physics
 - Rewrite physics simulation as CUDA kernels
 - Run thousands of environments in parallel on GPU
 - Similar to NVIDIA IsaacGym approach
 - Dramatic training speedup
 
-### Issue 11: Comparison with other RL algorithms
+### Issue 14: Comparison with other RL algorithms
 - SAC, A2C, DQN comparisons
 - Which algorithms discover bhop fastest?
 - Which produce the most optimal bhop technique?
