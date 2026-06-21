@@ -2,6 +2,7 @@
 
 Usage:
     python scripts/evaluate.py --model-path models/bhop_ppo --n-episodes 10
+    python scripts/evaluate.py --model-path models/bhop_ppo --export-demo out.dm_68
 """
 
 import argparse
@@ -11,6 +12,7 @@ import numpy as np
 from stable_baselines3 import PPO
 
 import bhop  # noqa: F401 -- triggers env registration
+from bhop.demo import DemoWriter, TickRecord
 
 
 def parse_args() -> argparse.Namespace:
@@ -28,19 +30,34 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--model-path", type=str, required=True)
     parser.add_argument("--n-episodes", type=int, default=10)
     parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument(
+        "--export-demo", type=str, default=None,
+        help="Export first episode as .dm_68 demo file",
+    )
+    parser.add_argument(
+        "--env-id", type=str, default="bhop/BhopFlat-v0",
+        help="Gymnasium environment ID",
+    )
     return parser.parse_args()
 
 
-def run_episode(model: PPO, env: gym.Env, deterministic: bool = True) -> dict:
+def run_episode(
+    model: PPO,
+    env: gym.Env,
+    deterministic: bool = True,
+    collect_ticks: bool = False,
+) -> dict:
     """Run a single episode and collect per-tick data.
 
     Args:
         model: Trained SB3 model.
         env: Gymnasium environment.
         deterministic: Use deterministic (mean) policy if True, stochastic if False.
+        collect_ticks: If True, also collect TickRecords for demo export.
 
     Returns:
-        Dict with keys: speeds, positions, actions, on_ground
+        Dict with keys: speeds, positions, actions, on_ground, and
+        optionally tick_records (list[TickRecord]).
     """
     obs, _ = env.reset()
     episode_data: dict = {
@@ -49,18 +66,36 @@ def run_episode(model: PPO, env: gym.Env, deterministic: bool = True) -> dict:
         "actions": [],
         "on_ground": [],
     }
+    if collect_ticks:
+        episode_data["tick_records"] = []
 
     done = False
+    tick = 0
     while not done:
         action, _ = model.predict(obs, deterministic=deterministic)
         obs, _, terminated, truncated, info = env.step(action)
         done = terminated or truncated
 
+        phys = env.unwrapped._physics
         episode_data["speeds"].append(info["speed"])
-        pos = env.unwrapped._physics.position[:2].copy()
+        pos = phys.position[:2].copy()
         episode_data["positions"].append(pos.tolist())
         episode_data["actions"].append(action.copy())
-        episode_data["on_ground"].append(bool(env.unwrapped._physics.on_ground))
+        episode_data["on_ground"].append(bool(phys.on_ground))
+
+        if collect_ticks:
+            episode_data["tick_records"].append(TickRecord(
+                server_time=tick * 8,  # 125fps = 8ms per tick
+                origin_x=phys.position[0],
+                origin_y=phys.position[1],
+                origin_z=phys.position[2],
+                velocity_x=phys.velocity[0],
+                velocity_y=phys.velocity[1],
+                velocity_z=phys.velocity[2],
+                yaw=np.degrees(phys.yaw),
+                on_ground=phys.on_ground,
+            ))
+        tick += 1
 
     return episode_data
 
@@ -69,16 +104,26 @@ def main() -> None:
     """Load model, run evaluation episodes, and print statistics."""
     args = parse_args()
 
-    env = gym.make("bhop/BhopFlat-v0")
+    env = gym.make(args.env_id)
     env.reset(seed=args.seed)
     model = PPO.load(args.model_path)
 
     all_episodes = []
     for i in range(args.n_episodes):
-        episode_data = run_episode(model, env)
+        collect = args.export_demo is not None and i == 0
+        episode_data = run_episode(model, env, collect_ticks=collect)
         all_episodes.append(episode_data)
 
     env.close()
+
+    # Export demo if requested
+    if args.export_demo:
+        ticks = all_episodes[0]["tick_records"]
+        # Extract map name from env_id
+        map_name = args.env_id.replace("bhop/", "").replace("-", "_").lower()
+        writer = DemoWriter(map_name)
+        writer.write(ticks, args.export_demo)
+        print(f"Exported demo: {args.export_demo} ({len(ticks)} ticks)")
 
     # Compute stats
     final_speeds = [ep["speeds"][-1] for ep in all_episodes]

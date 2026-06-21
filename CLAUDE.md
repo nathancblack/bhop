@@ -11,20 +11,31 @@ bhop/
 ├── CLAUDE.md                 # This file -- project context and conventions
 ├── pyproject.toml            # Dependencies: gymnasium, stable-baselines3, numpy, tensorboard, pytest
 ├── src/bhop/
-│   ├── __init__.py           # Gymnasium env registration (bhop/BhopFlat-v0)
-│   ├── physics.py            # Q3Physics class -- faithful to bg_pmove.c
+│   ├── __init__.py           # Gymnasium env registration (bhop/BhopFlat-v0, bhop/BhopCorridor-v0)
+│   ├── physics.py            # Q3Physics class -- faithful to bg_pmove.c (+ AABB collision, wall-slide)
+│   ├── geometry.py           # AABB brushes + ray/slab tracing; also exports to Quake .map
 │   ├── env.py                # BhopEnv(gymnasium.Env) -- wraps physics + reward
+│   ├── demo.py               # From-scratch Quake III .dm_68 demo writer (adaptive Huffman codec)
+│   ├── map_export.py         # MapGeometry -> Quake .map text (compilable to .bsp)
 │   └── viz.py                # Trajectory plots, policy analysis
 ├── scripts/
 │   ├── train.py              # PPO training entry point
-│   └── evaluate.py           # Load model, run episodes, print stats
-├── tests/
+│   ├── evaluate.py           # Load model, run episodes, print stats, optional demo export
+│   ├── export_demo.py        # Physics/agent run -> playable Quake .dm_68 (+ optional .map)
+│   └── export_run.py         # Physics/agent run -> self-contained HTML player
+├── tests/                    # 91 tests
 │   ├── test_physics.py       # Physics correctness (most important tests)
-│   └── test_env.py           # Gymnasium API compliance
-└── docs/
-    ├── quake3_physics.md     # Full C source reference from bg_pmove.c
-    ├── environment_design.md # Gymnasium env design details
-    └── issues.md             # All issues with sub-issues
+│   ├── test_geometry.py      # AABB/ray tracing
+│   ├── test_env.py           # Gymnasium API compliance
+│   ├── test_demo.py          # .dm_68 codec round-trips
+│   └── test_map_export.py    # .map export
+├── docs/
+│   ├── quake3_physics.md     # Full C source reference from bg_pmove.c
+│   ├── environment_design.md # Gymnasium env design details
+│   ├── dm68_format.md        # Quake III .dm_68 demo format notes
+│   └── issues.md             # All issues with sub-issues
+├── figures/                  # Rendered analysis plots
+└── site/                     # Generated self-contained HTML players
 ```
 
 ## Conventions
@@ -85,7 +96,7 @@ tick():
 See `docs/environment_design.md` for details.
 
 - **Observation**: `Box(5,)` -- [vel_x, vel_y, speed, vel_z, on_ground]
-- **Action**: `MultiDiscrete([3, 3, 2, N])` -- [forward, right, jump, yaw_delta]
+- **Action**: `Box(4,)` continuous -- [forward, right, jump, yaw_delta] (binary movement keys + continuous yaw)
 - **Reward**: `horizontal_speed / 320.0` per tick
 - **Episodes**: 1000 ticks (8s), start from zero velocity on ground
 

@@ -1,4 +1,4 @@
-# Task: Q3 Demo Export and Pixel-Based Navigation
+# Task: Debug Q3 Demo Playback in quake3e
 
 You are continuing work on an ongoing project. Read CLAUDE.md and all referenced documentation files before doing anything. Follow the conventions, structure, and patterns established in the existing codebase exactly. Do not refactor, rename, or reorganize existing code unless explicitly instructed to. Your sole task is described below.
 
@@ -6,242 +6,216 @@ You are continuing work on an ongoing project. Read CLAUDE.md and all referenced
 
 ## How to work through this prompt
 
-**Do not start implementing everything at once.** This prompt describes the remaining scope, but you must work through it one piece at a time.
+You are **debugging Q3 demo playback**. The demo writer is fully implemented (Steps 2-14 from the original plan are DONE), but the exported `.dm_68` files don't play correctly in quake3e yet.
 
-**Your first action: enter plan mode.** Before implementing anything, enter plan mode and break the "What you're implementing" section into a detailed, ordered plan. Each plan step should be a single function or logical unit. Present the plan to the user for approval before writing any code.
-
-Each cycle, you implement **one function or one logical unit**. After finishing it, stop, report what you did, run it to confirm it works, and ask the user before moving on to the next one.
+**Your approach:**
+1. Read `src/bhop/demo.py`, `docs/dm68_format.md`, and the bugs-fixed section below
+2. Understand what's been fixed already so you don't repeat work
+3. Continue debugging from the current state (described below)
+4. Each fix: edit code, run tests, regenerate demo, ask user to test in quake3e
+5. Reference ioquake3 source (github.com/ioquake/ioq3) as the authoritative spec
 
 **Rules:**
-- Enter plan mode first. Break the work into small steps. Get user approval on the plan.
-- Implement only what the user approves. Do not implement the next piece without asking.
-- Each cycle should be a single function or logical unit. Do not batch multiple pieces.
-- After implementing each piece, run it to confirm it works.
+- Run `pytest tests/test_demo.py` after every change
+- Regenerate demos with: `.venv/bin/python scripts/export_demo.py --output <path> --ticks 500 --map-name bhop_flat`
+- The quake3e binary is at: `/home/nate/code/bhop/CPMA-153-full-pack-v1/Q3/quake3e.x64`
+- Launch command: `cd /home/nate/code/bhop/CPMA-153-full-pack-v1/Q3 && ./quake3e.x64 +set fs_game "" +demo bhop_test`
+- Demo goes to: `/home/nate/code/bhop/CPMA-153-full-pack-v1/Q3/baseq3/demos/bhop_test.dm_68`
+- Custom BSP map at: `/home/nate/code/bhop/CPMA-153-full-pack-v1/Q3/baseq3/maps/bhop_flat.bsp`
+
+---
+
+## Current debugging state
+
+### What's happening now
+
+The demo **loads and plays** in quake3e — the engine parses the gamestate, loads the map, and starts playing snapshots. However:
+
+- **The player falls through the floor and the camera goes into the ground, rotating around on the floor surface**
+- The HUD shows "out of ammo" (expected since we don't set weapon stats)
+- The map `bhop_flat` loads (custom BSP compiled from `maps/bhop_flat.map`)
+
+### Likely causes (investigate these)
+
+1. **Player origin at (0,0,0) may be below or at the exact floor surface**. The bhop_flat map has floor at z=0. Our physics starts the player at origin (0,0,0). In Q3, the player model has a bbox extending below the origin point (player origin is at eye height, feet are ~24 units below). So origin z=0 means feet at z=-24, which is inside/below the floor.
+
+2. **The map may need rebuilding**. The current `bhop_flat.map` uses `common/caulk` for walls/ceiling (invisible) and `base_floor/techfloor2` for the floor. It was compiled with q3map2 but had a "leaked" warning because the original version wasn't a sealed box. A new version with walls was written to `maps/bhop_flat.map` but **was NOT recompiled** — the BSP in `baseq3/maps/` is still from the old open caulk-only map.
+   - q3map2 binary: `/tmp/nrc/install/q3map2` (built from netradiant-custom source at `/tmp/nrc`)
+   - Compile command: `export LD_LIBRARY_PATH=/tmp/nrc/install:$LD_LIBRARY_PATH && /tmp/nrc/install/q3map2 -game quake3 -fs_basepath /home/nate/code/bhop/maps /home/nate/code/bhop/maps/bhop_flat.map`
+   - Then light: `/tmp/nrc/install/q3map2 -game quake3 -fs_basepath /home/nate/code/bhop/maps -light -fast /home/nate/code/bhop/maps/bhop_flat.bsp`
+   - Copy: `cp /home/nate/code/bhop/maps/bhop_flat.bsp /home/nate/code/bhop/CPMA-153-full-pack-v1/Q3/baseq3/maps/bhop_flat.bsp`
+   - NOTE: There's a symlink `maps/baseq3/pak0.pk3 -> CPMA pack's pak0.pk3` for texture resolution during BSP compile
+   - NOTE: q3map2 needs `LD_LIBRARY_PATH=/tmp/nrc/install` for libassimp_.so. If `/tmp/nrc` doesn't exist, clone and rebuild: `cd /tmp && git clone --depth 1 https://github.com/Garux/netradiant-custom.git nrc && cd nrc && DEPENDENCIES_CHECK=off ASSIMP_INTERNAL=yes make binaries-q3map2 -j$(nproc)`
+
+3. **Player z-origin needs to be raised**. Our scripted bhop starts at the physics origin (0,0,0). For Q3 playback, the player origin should be at standing eye height above the floor. Try offsetting origin_z by +40 or +56 in `_tick_to_playerstate()` or in the export script.
+
+4. **`pm_type` field may need to be non-zero** to prevent the cgame from treating the player as spawning/dying. `pm_type=0` is PM_NORMAL which should be fine, but check if the cgame does anything special when the player hasn't fully "spawned" (no weapon, no armor, etc.).
+
+5. **Stats may need more fields**. Currently we set `stats[STAT_HEALTH]=100`. The cgame may also check `stats[STAT_ARMOR]`, `stats[STAT_WEAPONS]` (bitmask of held weapons), etc. A player with no weapons may trigger special "spectator" or "dead" rendering.
+
+### What to try first
+
+1. **Recompile the sealed map** (the .map file was updated with walls/ceiling/light but BSP wasn't regenerated)
+2. **Offset player z-origin** by +40 units so the player is above the floor surface  
+3. **Add weapon stats** if the player still appears dead/spectating
+
+---
+
+## Bugs already fixed (DO NOT re-introduce these)
+
+These bugs were found and fixed during this debugging session. Each was verified by re-running tests and regenerating demos.
+
+### Bug 1: Missing CS_GAME_VERSION configstring
+- **Symptom**: "CLIENT/SERVER GAME MISMATCH: BASEQ3-1/"
+- **Cause**: Q3's cgame checks configstring index 20 (`CS_GAME_VERSION`) against compiled-in `GAME_VERSION = "baseq3-1"`. We weren't writing this configstring.
+- **Fix**: Added `buf.write_byte(SVC_CONFIGSTRING); buf.write_short(20); buf.write_string("baseq3-1")` to `_write_gamestate()`
+- **Location**: `src/bhop/demo.py`, `_write_gamestate()`, around line 690
+
+### Bug 2: Missing SVC_EOF at end of messages
+- **Symptom**: "CL_PARSESERVERMESSAGE: ILLEGIBLE SERVER MESSAGE"  
+- **Cause**: `CL_ParseServerMessage` loops reading commands until `SVC_EOF`. Both gamestate and snapshot message payloads need `SVC_EOF` at the end. Gamestate needs TWO — one to end the configstring loop (inner), one to end the server message (outer).
+- **Fix**: Added `buf.write_byte(SVC_EOF)` at end of both `_write_gamestate()` and `_write_snapshot()`
+- **Location**: `src/bhop/demo.py`, end of `_write_gamestate()` and `_write_snapshot()`
+
+### Bug 3: Wrong stat array encoding
+- **Symptom**: "CL_PARSEPACKETENTITIES: END OF MESSAGE"
+- **Cause**: We wrote four 16-bit zero bitmasks (`write_short(0)` x4 = 64 bits) for stat arrays. Q3's actual format starts with a single bit: 0 = no arrays changed (return immediately), 1 = then per-array changed bits + bitmasks. With no changes, it's just 1 bit, not 64.
+- **Fix**: Changed `_write_stat_arrays()` to write `buf.write_bits(0, 1)` when no stats changed, or a proper hierarchical encoding when stats are set (currently writes health=100).
+- **Location**: `src/bhop/demo.py`, `_write_stat_arrays()`
+
+### Bug 4: Wrong float field encoding (3-way vs 2-way)
+- **Symptom**: "CL_PARSEPACKETENTITIES: END OF MESSAGE" (bit misalignment in playerstate)
+- **Cause**: Our `_write_delta_field` had a 3-way encoding for floats: (1) zero → single 0 bit, (2) small integer → `1,0` + 13 bits, (3) full float → `1,1` + 32 bits. But Q3's actual encoding has only 2 paths: (1) small integer (including zero) → `0` + 13 bits, (2) full float → `1` + 32 bits. Zero is encoded as 13-bit value 4096 (0 + FLOAT_INT_BIAS). Our phantom "zero = 1 bit" path saved 13 bits per zero field, causing every subsequent field to be misaligned.
+- **Fix**: Removed the zero special case. All integers that fit in 13-bit biased range (including zero) use path 1: `write_bits(0, 1)` + `write_bits(val + FLOAT_INT_BIAS, 13)`.
+- **Location**: `src/bhop/demo.py`, `_write_delta_field()`, around line 562
+
+### Bug 5: get_data() buffer size formula
+- **Symptom**: "CL_PARSEPACKETENTITIES: END OF MESSAGE" (intermittent, depends on bit alignment)
+- **Cause**: Our `get_data()` used `(self._bit + 7) >> 3` (ceiling division) for buffer size. Q3 uses `(msg->bit >> 3) + 1`. These differ when `_bit` is a multiple of 8: e.g., 64 bits → we return 8 bytes, Q3 expects 9. The reader sets `readcount = (bit>>3)+1` after reading, and checks `readcount > cursize` for overflow. With cursize=8 instead of 9, the check false-positives.
+- **Fix**: Changed to `(self._bit >> 3) + 1` with padding, matching Q3's formula exactly.
+- **Location**: `src/bhop/demo.py`, `MsgBuffer.get_data()`, around line 300
+
+### Bug 6: Non-delta snapshots
+- **Symptom**: Various parse errors on later snapshots
+- **Cause**: Delta snapshots reference previous snapshot by sequence number. Q3 only caches ~32 snapshots. Our `delta_num=seq-1` would reference snapshots outside the cache window after snapshot 32. Also, `delta_num` is a byte, so it wraps at 256.
+- **Fix**: Changed all snapshots to non-delta (`delta_num=0, from_ps=None`). Larger files but guaranteed to parse correctly.
+- **Location**: `src/bhop/demo.py`, `DemoWriter.write()`, around line 804
+
+### Other fixes applied:
+- **CS_SYSTEMINFO**: Changed from `\sv_serverid\0` to `\sv_serverid\1234\sv_pure\0\sv_maxclients\8`
+- **CS_SERVERINFO**: Added `\version\baseq3-1` (redundant with CS_GAME_VERSION fix but harmless)
+- **export_demo.py**: Added `--map-name` CLI flag to override map name in demo
+- **Health stats**: `_write_stat_arrays()` now sets `stats[STAT_HEALTH]=100` to prevent player appearing dead
 
 ---
 
 ## Context: What has already been done
 
+### Issue 10: Q3 demo export -- IMPLEMENTED, DEBUGGING PLAYBACK
+
+All 13 implementation steps (2-14) are complete. The code is fully implemented and passes 91 tests.
+
+**10a: Research .dm_68 format -- COMPLETE**
+- `docs/dm68_format.md`: Full format documentation
+
+**10b: Demo writer -- COMPLETE (with bugs fixed above)**
+- `src/bhop/demo.py` (~810 lines): Full implementation:
+  - `HuffmanCodec`: static Huffman tree from pre-computed structure (Q3's msg_hData)
+  - `MsgBuffer` / `MsgReader`: MSG_WriteBits/ReadBits with Huffman encoding
+  - `write_delta_playerstate()`: 32-field netfield delta with float 2-way encoding
+  - `_write_gamestate()`: configstrings (CS_SERVERINFO, CS_SYSTEMINFO, CS_GAME_VERSION, CS_PLAYERS)
+  - `_write_snapshot()`: playerstate delta + entity terminator + SVC_EOF
+  - `_write_stat_arrays()`: hierarchical stat encoding with STAT_HEALTH=100
+  - `DemoWriter(map_name).write(ticks, path)`: complete .dm_68 with non-delta snapshots + EOF
+  - `TickRecord` dataclass: per-tick physics state for demo export
+- `tests/test_demo.py`: 29 tests (Huffman round-trip, MsgBuffer round-trip, DemoWriter structure + physics integration)
+
+**10c: Q3 map file generation -- COMPLETE**
+- `src/bhop/map_export.py`: `_brush_to_planes()`, `export_map()`
+- `tests/test_map_export.py`: 14 tests
+- `maps/bhop_flat.map`: Simple sealed flat arena (4096x4096, floor at z=0, walls, ceiling, light entity)
+- BSP compiled via q3map2 (from netradiant-custom built at `/tmp/nrc/install/q3map2`)
+
+**10d: End-to-end pipeline**
+- `scripts/export_demo.py`: standalone pipeline (scripted bhop or trained model → .dm_68)
+  - `--map-name` flag overrides map name in demo (use `bhop_flat` for custom map)
+- `scripts/evaluate.py`: added `--export-demo` and `--env-id` flags
+
+### Full test suite: 91 passed, 0 skipped
+```
+.venv/bin/pytest tests/ -q
+```
+
+### Previous issues (1-9) -- ALL COMPLETE
+See the sections below (unchanged from previous session).
+
 ### Issue 1: Project skeleton + physics engine -- COMPLETE
 - `src/bhop/physics.py`: Q3Physics class with all 13 methods, fully verified
 - `src/bhop/__init__.py`: Gymnasium env registration (bhop/BhopFlat-v0, bhop/BhopCorridor-v0)
-- `pyproject.toml`: All dependencies configured, including `notebook` optional deps (jupyter, nbconvert, matplotlib)
+- `pyproject.toml`: All dependencies configured
 
 ### Issue 2: Physics test suite -- COMPLETE (16/16 tests passing)
-- `tests/test_physics.py`: All 16 tests implemented and passing
-  - TestBasicPhysics (8 tests): standing still, ground accel, friction, diagonal, jump, gravity, air friction, air accel
-  - TestPMAccelerate (4 tests): exact ground, addspeed clamp, no accel above, perpendicular
-  - TestBhop (4 tests): exceeds maxspeed, speed increases over jumps, no bhop without strafe, no bhop without jumping
+- `tests/test_physics.py`: All 16 tests
 
 ### Issue 3: Gymnasium environment -- COMPLETE (9/9 tests passing, continuous action space)
-- `src/bhop/env.py`: BhopEnv fully implemented with **continuous action space**
-  - Observation: Box(5,) float32 -- [vel_x, vel_y, speed, vel_z, on_ground], clipped to [-2000, 2000]
-  - Action: **Box(4,) float32** -- [forward, right, jump, yaw_delta]
-    - forward/right: thresholded at ±0.33 → {-127, 0, +127}
-    - jump: thresholded at 0.0
-    - yaw_delta: continuous degrees in [-5.0, +5.0], converted to radians
-  - Reward: horizontal_speed / 320.0
-  - Info dict: {speed, max_speed, jumps}
-  - Jump counting via ground-to-air transition detection
-  - Obs clipping to declared bounds
-  - SB3 check_env passes
-  - Accepts optional `map_geometry: MapGeometry | None` parameter, passed to Q3Physics
-- `tests/test_env.py`: All 9 tests passing with continuous actions
+- `src/bhop/env.py`: BhopEnv with continuous Box(4,) action space
 
 ### Issue 4: Training script -- COMPLETE
-- `scripts/train.py`: Fully implemented
-  - CLI args: --env-id, --timesteps, --n-envs, --seed, --save-path, --ent-coef, --net-arch
-  - `--env-id` defaults to "bhop/BhopFlat-v0", also works with "bhop/BhopCorridor-v0"
-  - SubprocVecEnv, PPO with configurable hyperparams
-  - SpeedLoggingCallback, CheckpointCallback every 50k steps
-  - Verified: runs on CUDA with 8 envs, ~3300 fps (flat), ~3150 fps (corridor)
+- `scripts/train.py`: PPO training with SubprocVecEnv
 
 ### Issue 5: Evaluation + Visualization -- COMPLETE
-- `scripts/evaluate.py`: Fully implemented
-  - `run_episode(model, env, deterministic=True)`: accepts `deterministic` param
-  - `main()`: Loads model, runs N episodes, prints stats
-- `src/bhop/viz.py`: All 5 visualization functions, updated for continuous actions
-  - `plot_action_distribution()`: histograms for continuous yaw, thresholded bars for forward/right/jump
-  - `analyze_policy()`: thresholds continuous actions to match env._map_action()
+- `scripts/evaluate.py`, `src/bhop/viz.py`
 
 ### Issue 6: Tuning + Bhop Verification -- COMPLETE
-- `scripts/sweep.py`: 12-config grid sweep (ent_coef x net_arch)
+- `scripts/sweep.py`
 
-### Continuous action space conversion -- COMPLETE
-All 8 sub-tasks done:
-1. env.py → Box(4,) action space with threshold-based _map_action()
-2. test_env.py updated for continuous actions
-3. viz.py updated (histograms, direct yaw degrees)
-4. evaluate.py updated (deterministic param)
-5. train.py + sweep.py verified (no changes needed, PPO auto-selects Gaussian policy)
-6. 2M model trained: `models/bhop_2m_continuous`
-7. 10M model trained: `models/bhop_10m_continuous`
-8. Notebook updated to load continuous model, uses stochastic eval
-
-### Issue 9: Map geometry + collision -- COMPLETE (23/23 geometry tests passing)
-
-Added AABB collision detection to the physics engine. Geometry is dual-purpose: usable in Python training AND designed to map directly to Q3 brush primitives for `.map` export.
-
-- `src/bhop/geometry.py` (new):
-  - `Brush` dataclass: `mins`, `maxs` as float64 arrays (accepts tuples or arrays)
-  - `TraceResult` dataclass: `fraction`, `normal`, `hit`
-  - `MapGeometry` class: holds `list[Brush]`, `add_brush(mins, maxs)` method
-  - `trace_ray(start, end, brush)`: slab method ray-AABB intersection, returns earliest entry fraction + outward-facing surface normal. Handles: parallel rays, start-inside-brush (allsolid, fraction=0), ray too short, zero-length rays
-  - `trace(start, end, geometry)`: iterates all brushes, returns nearest hit
-  - `_DIST_EPSILON = 0.03125` (1/32 unit, matches Q3): used in parallel-axis containment and allsolid checks to prevent false positives when player is on a brush surface
-  - Map factories: `corridor_map()`, `turn_map()`, `platform_map()`
-
-- `src/bhop/physics.py` (modified):
-  - `Q3Physics.__init__()` accepts optional `geometry: MapGeometry | None = None`
-  - `_pm_clip_velocity(velocity, normal, overbounce=1.001)`: mirrors Q3's PM_ClipVelocity
-  - `_pm_slide_move()`: replaces raw `position += velocity * FRAMETIME`. Traces movement, clips velocity on hit, retries up to 4 bumps (MAX_CLIP_PLANES). Uses SURFACE_CLIP_EPSILON (1/32 unit) offset. When geometry=None, falls back to raw position update (identical to original)
-  - `_pm_ground_trace()`: two paths -- flat-plane (geometry=None, unchanged) and geometry-based (traces downward 0.25 units, ground if normal_z > 0.7 = MIN_WALK_NORMAL). World floor at z=0 always present as fallback
-  - `ground_normal` state variable tracks surface normal
-  - Full backwards compatibility: `Q3Physics()` with no geometry behaves identically to before
-
-- `src/bhop/env.py` (modified):
-  - `BhopEnv.__init__()` accepts optional `map_geometry: MapGeometry | None`
-  - Passes geometry through to `Q3Physics(geometry=map_geometry)`
-
-- `src/bhop/__init__.py` (modified):
-  - Registered `bhop/BhopCorridor-v0` with `corridor_map()` geometry
-
-- `tests/test_geometry.py` (new, 23 tests):
-  - TestTrace (9): empty space, face-on hit, reverse hit, parallel miss, inside brush, on-surface not allsolid, too short, multi-brush nearest, empty geometry
-  - TestCollision (3): wall stop, wall slide, corridor containment
-  - TestGroundTrace (5): floor brush, raised platform, midair, world floor fallback, wall face not ground
-  - TestPhysicsWithGeometry (3): bhop in corridor, no-geometry backwards compat, jump and land
-  - TestOriginalPhysicsRegression (3): standing still, ground acceleration, bhop exceeds maxspeed
-
-- `scripts/train.py` (modified):
-  - Added `--env-id` CLI arg (default: "bhop/BhopFlat-v0")
-  - `make_env()` accepts `env_id` parameter
-
-#### Key implementation notes for future phases:
-- **Wall brushes must extend below floor** (e.g., z=-64 to z=128, not z=0 to z=128). Due to DIST_EPSILON in the slab method, a player at z=0 on a floor surface is considered "outside" a wall brush that starts exactly at z=0. This matches standard Q3 mapping practice where brushes overlap at seams.
-- **Overbounce from slide-move can leave vel_z slightly positive.** The geometry ground trace does NOT gate on velocity direction (unlike the flat-plane path). This prevents the player from bouncing infinitely on floor surfaces.
-- **Point traces, not bbox**: simplified from Q3's CM_BoxTrace. If demo playback shows drift from this simplification, upgrade to bbox traces later.
+### Issue 8: Continuous action space -- COMPLETE
+### Issue 9: Map geometry + collision -- COMPLETE (23/23 tests)
 
 ### Training results summary
 
-| Model | Mean Speed | Max Speed | Airborne % | Notes |
-|-------|-----------|-----------|------------|-------|
-| Discrete 2M (`models/bhop_2m`) | 523.5 | 631.1 | 96% | Deterministic eval, 10 identical episodes |
-| Continuous 2M (`models/bhop_2m_continuous`) | 616.6 | 857.6 | 96% | Stochastic eval (deterministic is poor due to threshold effects) |
-| Continuous 10M (`models/bhop_10m_continuous`) | 656.5 | 925.9 | 96% | Best flat-plane model. Still accelerating at tick 1000 |
-| Corridor 2M (`models/bhop_corridor_2m`) | 540 | 628 | -- | First corridor model. Bhop discovered with collision physics |
-
-**Important note on continuous models**: The deterministic policy (mean of Gaussian) often lands near threshold boundaries (e.g., right action at -0.37 barely crossing the -0.33 threshold). Stochastic eval (`deterministic=False`) is much more representative of learned behavior. This is a known issue with thresholded continuous actions.
-
-### Issue 7a: Analysis notebook -- COMPLETE
-- `notebooks/analysis.ipynb`: All 4 sections implemented, loads `models/bhop_2m_continuous`
-- Uses `deterministic=False` for trained agent evaluation
-- Verified: `jupyter nbconvert --execute` runs end-to-end
-
-### Issue 7b: README -- NOT STARTED
-- Deferred until after demo work.
-
-### Full test suite: 48 passed, 0 skipped
-```
-.venv/bin/pytest tests/ -v
-```
-
----
-
-## What you're implementing
-
-The end goal is an RL agent that bhops through a Q3 map with obstacles, trained from pixel observations, with its runs playable as Q3 demo files in ioquake3/DeFRaG. Two major phases remain.
-
-### Phase 2: Q3 demo export (Issue 10)
-
-Record the agent's per-tick inputs and write them as a Q3 `.dm_68` demo file that plays back in ioquake3.
-
-#### Sub-tasks:
-
-**2a: Research and document the `.dm_68` format**
-- The demo format stores: gamestate messages (server info, config strings, baselines) + snapshots (playerstate, entity deltas) + `usercmd_t` per frame
-- Key struct: `usercmd_t { serverTime, angles[3], forwardmove, rightmove, upmove, buttons }`
-- Research from ioquake3 source: `cl_main.c` (CL_WriteDemoMessage), `msg.c` (MSG_WriteBits)
-- Document the minimum viable demo: single player, flat map, no entities
-
-**2b: Implement demo writer**
-- `src/bhop/demo.py`: class that accumulates per-tick `usercmd_t` and writes `.dm_68`
-- Input: list of `(forward_move, right_move, jump, yaw, pitch)` per tick + map name
-- Output: binary `.dm_68` file playable in ioquake3
-- **Test first on flat plane**: record a known bhop sequence, play in ioquake3, verify it looks right
-
-**2c: Q3 map file generation**
-- `src/bhop/map_export.py`: convert Python AABB geometry → Q3 `.map` text format
-- Q3 `.map` format is human-readable: brushes defined by plane equations
-- AABB → 6 planes is straightforward
-- Add spawn point entity, light, worldspawn
-- The `.map` compiles to `.bsp` via `q3map2` (external tool, user runs separately)
-- **Test**: generated `.map` compiles with q3map2; loads in ioquake3
-
-**2d: End-to-end pipeline test**
-- Train agent on a simple corridor map in Python
-- Export its best run as a `.dm_68` demo
-- Export the map as `.map`, compile to `.bsp`
-- Play demo in ioquake3 on that map
-- Verify the agent's trajectory matches (no major drift/clipping)
-
-### Phase 3: Pixel-based observation (Issue 12)
-
-Replace vector observations with rendered frames. See `docs/pixel_obs_plan.md` for the detailed plan already written.
-
-#### Sub-tasks (summarized, full detail in pixel_obs_plan.md):
-
-**3a: Top-down renderer** -- pygame, 84x84 RGB, shows player/map/velocity
-**3b: Frame stacking wrapper** -- stack 4 frames for motion inference
-**3c: CNN policy** -- SB3 CnnPolicy, may need custom feature extractor
-**3d: Training + comparison** -- 10M+ steps, compare against vector-obs baseline
-**3e: Analysis** -- CNN feature visualization, Grad-CAM, training curve comparison
+| Model | Mean Speed | Max Speed | Notes |
+|-------|-----------|-----------|-------|
+| Continuous 10M (`models/bhop_10m_continuous`) | 656.5 | 925.9 | Best flat-plane model |
+| Corridor 2M (`models/bhop_corridor_2m`) | 540 | 628 | First corridor model |
 
 ---
 
 ## Key implementation notes
 
-1. **The continuous action space is final.** Do not revert to discrete.
-2. **Existing models** (`models/bhop_2m`, `models/bhop_2m_continuous`, `models/bhop_10m_continuous`, `models/bhop_corridor_2m`) must not be deleted. They are baselines.
-3. **Stochastic eval**: continuous models should be evaluated with `deterministic=False` for representative results.
-4. **The Q3 demo format is complex.** Phase 2a (research) should be thorough before writing code. The ioquake3 source is the authoritative reference.
-5. **Map geometry is dual-purpose**: the `Brush` AABB data in `geometry.py` maps directly to Q3 brush primitives (6 axis-aligned planes). Phase 2c's map exporter converts these.
-6. **Wall brushes must extend below floor** for proper collision (see Issue 9 notes above).
-7. **Point traces may cause demo drift.** If Q3 playback desyncs from Python simulation, the likely cause is point-vs-bbox trace difference. Upgrade `trace_ray` to accept a player bbox if needed.
+1. **The Huffman tree is STATIC** after initialization. Q3's `MSG_WriteBits` does NOT call `Huff_addRef`. Our implementation uses a pre-computed tree structure.
+2. **Float encoding is 2-way, not 3-way.** Zero is encoded as 13-bit biased integer (value 4096), not as a special 1-bit case. See Bug 4 above.
+3. **Stat arrays use hierarchical encoding.** Single bit for "any changed?", then per-array bits. See Bug 3 above.
+4. **Message data size must use Q3's formula: `(bit >> 3) + 1`**, not ceiling division. See Bug 5 above.
+5. **Every message payload must end with SVC_EOF.** Gamestate needs two (inner loop + outer). See Bug 2 above.
+6. **All snapshots are non-delta** (delta_num=0). Larger but reliable. Can optimize later once playback works.
+7. **CS_GAME_VERSION (configstring 20)** must be `"baseq3-1"` to match cgame's compiled GAME_VERSION.
+8. **q3map2** is built at `/tmp/nrc/install/q3map2` (needs `LD_LIBRARY_PATH=/tmp/nrc/install`). If `/tmp` was cleaned, rebuild from netradiant-custom source.
 
 ---
 
 ## Verification checklist
 
-After each phase:
-
-**Phase 2 (demo export):**
-1. Demo file plays in ioquake3 without crashing
-2. Flat-plane bhop demo visually matches Python simulation
-3. Corridor map compiles to .bsp and loads in ioquake3
-4. Agent's corridor run plays back correctly in Q3
-
-**Phase 3 (pixel obs):**
-1. Renderer produces correct 84x84 RGB frames
-2. Frame-stacked env passes check_env
-3. CNN policy trains and shows learning signal
-4. Agent discovers bhop from pixels (speed > 400 mean)
+**Phase 2 (demo export) -- IN PROGRESS:**
+1. [x] Demo file loads in quake3e without parse errors
+2. [ ] Player is visible and moves correctly (CURRENT BLOCKER)
+3. [ ] Flat-plane bhop demo visually matches Python simulation
+4. [ ] Corridor map compiles to .bsp and loads  
+5. [ ] Agent's corridor run plays back correctly
 
 ---
 
 ## Updating this file (loop instructions)
 
-When the user writes **"PREPARE NEXT SESSION"**, you must immediately update this file (`initialprompt.md`) to reflect the current state of the project. This is the handoff procedure — after this update the user will clear the context window and start a fresh session by reading this file.
+When the user writes **"PREPARE NEXT SESSION"**, you must immediately update this file (`initialprompt.md`) to reflect the current state of the project.
 
 **When triggered by "PREPARE NEXT SESSION", do the following:**
-1. Move all completed items from "What you're implementing" to "What has already been done" with full implementation details (file paths, function names, what was verified).
-2. If all current items are done, replace the task description with the next issue from `docs/issues.md`. If the core project is complete, list stretch goals.
-3. Preserve the same format and level of detail as the existing "What has already been done" sections.
-4. Keep the pacing instructions ("How to work through this prompt" section) and this "Updating this file" section intact — they must survive into the next session.
+1. Move all completed items from "What you're implementing" to "What has already been done" with full implementation details.
+2. If all current items are done, replace the task description with the next issue from `docs/issues.md`.
+3. Preserve the same format and level of detail.
+4. Keep the pacing instructions and this section intact.
 5. Update the "Full test suite" line if the test count changed.
-6. Add any important notes about pending work, known issues, or decisions the next session needs to be aware of.
-7. **Update docs/**: Ensure `docs/issues.md`, `docs/environment_design.md`, and any other docs reflect the current state. Mark completed issues, update action space or architecture descriptions if they changed, and add any new issues that were defined during the session.
+6. Add any important notes about pending work, known issues, or decisions the next session needs.
+7. **Update docs/**: Ensure `docs/issues.md` and other docs reflect current state.
 
 After updating, confirm to the user that the file is ready and they can safely clear the context.
-
-This file is the handoff document between conversation contexts. Treat it as the single source of truth for what has been done and what remains.

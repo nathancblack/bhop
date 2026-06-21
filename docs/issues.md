@@ -228,24 +228,36 @@ given speed is approximately `arccos(wishspeed / |velocity|)` per tick, which at
 
 **Goal**: Record agent inputs as `.dm_68` demo files playable in ioquake3/DeFRaG.
 
-### 10a: Research `.dm_68` format
-- Document from ioquake3 source: gamestate messages, snapshots, usercmd_t
-- Key struct: `usercmd_t { serverTime, angles[3], forwardmove, rightmove, upmove, buttons }`
-- Document minimum viable demo structure
+### 10a: Research `.dm_68` format -- COMPLETE
+- `docs/dm68_format.md`: Full format documentation covering file framing, adaptive Huffman compression, message types (gamestate, snapshot), playerstate delta encoding with netfield table, float encoding, coordinate system, entity constants
+- References: ioquake3 source (msg.c, cl_main.c, bg_public.h), jfedor2/quake3-proxy-aimbot Python reference
 
-### 10b: Demo writer
-- `src/bhop/demo.py`: accumulates per-tick usercmd_t, writes binary `.dm_68`
-- **Test**: flat-plane bhop demo plays in ioquake3
+### 10b: Demo writer -- COMPLETE
+- `src/bhop/demo.py`: Full implementation:
+  - `HuffmanCodec`: static Huffman tree from pre-computed structure (Q3's msg_hData)
+  - `MsgBuffer` / `MsgReader`: MSG_WriteBits/ReadBits with Huffman encoding
+  - `write_delta_playerstate()`: 32-field netfield delta with float 0/13-bit/32-bit encoding
+  - `_write_gamestate()`: configstrings (mapname, systeminfo, player)
+  - `_write_snapshot()`: playerstate delta + entity terminator (ENTITYNUM_NONE as 10 bits)
+  - `DemoWriter(map_name).write(ticks, path)`: complete .dm_68 file with framing + EOF
+  - `TickRecord` dataclass: per-tick physics state for demo export
+- `tests/test_demo.py`: 29 tests (Huffman round-trip, MsgBuffer round-trip, DemoWriter structure + physics integration)
+- `scripts/evaluate.py`: added `--export-demo` and `--env-id` flags
+- `scripts/export_demo.py`: standalone pipeline (scripted bhop or trained model → .dm_68)
+- **Key discovery**: Q3's MSG_WriteBits does NOT call Huff_addRef -- tree is static after MSG_initHuffman()
+- **Pending**: ioquake3 playback verification (requires Q3 installation)
 
-### 10c: Q3 map file generation
-- `src/bhop/map_export.py`: convert Python AABB geometry → Q3 `.map` text format
-- AABB → 6 brush planes, add spawn point, worldspawn entity
-- Compiles to `.bsp` via external `q3map2`
-- **Test**: Generated `.map` compiles and loads in ioquake3
+### 10c: Q3 map file generation -- COMPLETE
+- `src/bhop/map_export.py`:
+  - `_brush_to_planes(brush)`: AABB → 6 axis-aligned half-planes (3 CCW points each)
+  - `export_map(geometry, path, spawn_origin, map_name)`: full .map file with worldspawn + spawn entity
+- `tests/test_map_export.py`: 14 tests (plane conversion, file structure, all map factories)
+- `scripts/export_demo.py --export-map`: exports .map alongside .dm_68
+- **Pending**: q3map2 BSP compilation verification
 
-### 10d: End-to-end pipeline test
-- Train on corridor → export demo → export map → play in Q3
-- Verify trajectory matches (no major drift)
+### 10d: End-to-end pipeline test -- PARTIALLY COMPLETE
+- Pipeline implemented: `scripts/export_demo.py` runs physics → .dm_68 + .map
+- **Pending**: actual Q3 playback verification (requires ioquake3 + q3map2)
 
 ---
 
