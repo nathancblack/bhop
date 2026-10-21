@@ -46,18 +46,19 @@ def parse_args() -> argparse.Namespace:
 def run_scripted_bhop(n_ticks: int, geometry=None) -> list[TickRecord]:
     """Run scripted bhop inputs through Q3Physics.
 
-    Uses the same inputs as the bhop verification test:
-    strafe right + jump + yaw rotation at 0.4 deg/tick.
+    Uses the same release-jump-airstrafe cycle as the bhop verification test:
+    jump must be released for one tick before it can fire again, then the player
+    strafes right while rotating yaw 0.4 deg/tick for the whole airborne arc.
+    Holding jump every tick would only ever produce a single hop (jump_held
+    never clears), so the cycle is essential.
     """
     phys = Q3Physics(geometry=geometry)
     ticks = []
     yaw_rate = np.radians(0.4)
 
-    for i in range(n_ticks):
-        phys.tick(forward_move=0, right_move=127, jump=True,
-                  yaw_delta=yaw_rate)
+    def snapshot() -> None:
         ticks.append(TickRecord(
-            server_time=i * 8,
+            server_time=len(ticks) * 8,  # 125fps = 8ms per tick
             origin_x=phys.position[0],
             origin_y=phys.position[1],
             origin_z=phys.position[2],
@@ -68,7 +69,30 @@ def run_scripted_bhop(n_ticks: int, geometry=None) -> list[TickRecord]:
             on_ground=phys.on_ground,
         ))
 
-    return ticks
+    # Build up ground speed to the 320 cap first (forward, no strafe).
+    for _ in range(min(150, n_ticks)):
+        phys.tick(forward_move=127, right_move=0, jump=False, yaw_delta=0)
+        snapshot()
+
+    # Then bhop cycles until we run out of ticks.
+    while len(ticks) < n_ticks:
+        # Release jump for one tick (on ground), realigning aim to velocity.
+        phys.yaw = float(np.arctan2(phys.velocity[1], phys.velocity[0]))
+        phys.tick(forward_move=0, right_move=0, jump=False, yaw_delta=0)
+        snapshot()
+        if len(ticks) >= n_ticks:
+            break
+        # Jump, then air-strafe until we land again.
+        phys.tick(forward_move=0, right_move=127, jump=True, yaw_delta=yaw_rate)
+        snapshot()
+        for _ in range(200):
+            if phys.on_ground or len(ticks) >= n_ticks:
+                break
+            phys.tick(forward_move=0, right_move=127, jump=False,
+                      yaw_delta=yaw_rate)
+            snapshot()
+
+    return ticks[:n_ticks]
 
 
 def run_model(model_path: str, env_id: str, n_ticks: int,
